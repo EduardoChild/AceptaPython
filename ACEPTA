@@ -1,0 +1,192 @@
+import win32com.client
+from pathlib import Path
+import datetime
+import re
+
+##PARTE 1 .TXT CON INFO DE LOS CORREOS, APLICA REGLAS DE NOMBRE
+output_dir = Path.cwd() / "Output"
+output_dir.mkdir(parents=True, exist_ok=True)
+outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+
+inbox = outlook.GetDefaultFolder(6)
+messages = inbox.Items
+
+# Lista de nombres a filtrar con su respectivo nombre
+nombres_filtrados = [
+    ('ACEPTA - REPORTE AGENDADO Reporte Programado Boletas Emitidas_Cuadre de Ventas', 'Itahue'),
+    ('ACEPTA - REPORTE AGENDADO Reporte Programado BOLETAS EMITIDAS COMTERRA', 'Comterra')
+]
+
+# Diccionario para mantener el correo más reciente por nombre
+correos_recientes = {nombre: None for nombre, _ in nombres_filtrados}
+
+# Ordenar los correos por fecha en orden descendente
+messages.Sort("[ReceivedTime]", True)
+
+for msg in messages:
+    subject = msg.Subject
+    body = msg.body
+    attachments = msg.Attachments
+
+    for nombre_filtrado, nombre in nombres_filtrados:
+        if nombre_filtrado in str(subject) and correos_recientes[nombre_filtrado] is None:
+            correos_recientes[nombre_filtrado] = msg
+
+# Obtener la fecha actual
+today = datetime.datetime.today()
+
+# Si el día es el primero del mes, restar un mes a la fecha actual
+if today.day == 1:
+    today -= datetime.timedelta(days=1)
+    
+# Obtener el año y mes actual
+year_month = today.strftime("%Y-%m")
+
+# Procesar los correos más recientes encontrados
+for nombre_filtrado, nombre in nombres_filtrados:
+    msg = correos_recientes[nombre_filtrado]
+    if msg:
+        subject = msg.Subject
+        body = msg.body
+        attachments = msg.Attachments
+
+        # Save body to text file with the name format "nombre_ano-mes.txt" in the "Output" folder
+        file_name = f"{nombre} {year_month}.txt"
+        with open(output_dir / file_name, "w", encoding="utf-8") as file:
+            file.write(str(body))
+
+        # Save attachments with the name format "nombre_ano-mes_nombre_archivo" in the "Output" folder
+        for attachment in attachments:
+            filename = re.sub('[^0-9a-zA-Z\.]+', '', attachment.FileName)
+            new_filename = f"{nombre} {year_month}_{filename}"
+            attachment.SaveAsFile(output_dir / new_filename)
+### PARTE2 DESCARGAR, DESCOMPRIMIR Y RENOMBRAR 
+
+import os
+from pathlib import Path
+import requests
+import zipfile
+from datetime import datetime, timedelta
+
+output_dir = Path.cwd() / "Output"
+descarga_dir = output_dir / "Descarga"
+descarga_dir.mkdir(parents=True, exist_ok=True)
+
+def download_file(url, output_path):
+    response = requests.get(url)
+    with open(output_path, "wb") as file:
+        file.write(response.content)
+
+def unzip_file(zip_path, output_dir):
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        # Get the list of extracted files from the ZIP archive
+        extracted_files = zip_ref.namelist()
+        # Extract all files to the output directory
+        zip_ref.extractall(output_dir)
+    # Return the list of extracted files
+    return extracted_files
+
+def get_download_file_name(url):
+    # Get the filename from the URL
+    file_name = os.path.basename(url)
+
+    # Remove the ".zip" extension if present
+    if file_name.lower().endswith(".zip"):
+        file_name = file_name[:-4]
+
+    return file_name
+
+def download_and_rename_files():
+    # Lista para almacenar los nombres de los archivos CSV descomprimidos y sus archivos TXT correspondientes
+    csv_and_txt_files = []
+
+    for file_path in output_dir.glob("*.txt"):
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+            links = re.findall(r"http[s]?://(?:[^\s<>]+)", content)
+            for link in links:
+                try:
+                    response = requests.get(link)
+                    if response.status_code == 200:
+                        file_name = os.path.basename(link)
+                        download_path = descarga_dir / file_name
+                        download_file(link, download_path)
+                        print(f"Archivo {file_name} descargado desde {link}")
+
+                        # Si es un archivo ZIP, descomprimirlo en la carpeta "Descarga"
+                        if download_path.suffix == ".zip":
+                            extracted_files = unzip_file(download_path, descarga_dir)
+                            print(f"Archivo {file_name} descomprimido en {descarga_dir}")
+
+                            # Borrar el archivo ZIP original después de descomprimirlo
+                            os.remove(download_path)
+                            print(f"Archivo {file_name} eliminado")
+
+                            # Obtener el nombre del archivo CSV descomprimido
+                            csv_file_name = [file for file in extracted_files if file.lower().endswith(".csv")][0]
+
+                            # Agregar el nombre del archivo TXT y el nombre del archivo CSV a la lista
+                            csv_and_txt_files.append((file_path.stem, csv_file_name))
+                    else:
+                        print(f"Error al descargar el archivo desde {link}: {response.status_code}")
+                except Exception as e:
+                    print(f"Error al descargar el archivo desde {link}: {e}")
+
+    print("Lista de archivos TXT y sus archivos CSV correspondientes:")
+    print(csv_and_txt_files)
+
+    # Renombrar los archivos CSV por su ID correspondiente
+    for txt_file, csv_file in csv_and_txt_files:
+        txt_file_path = output_dir / f"{txt_file}.txt"
+        csv_file_path = descarga_dir / f"{csv_file}"
+        new_csv_file_path = descarga_dir / f"{txt_file}.csv"
+
+        try:
+            # Renombrar el archivo CSV
+            os.rename(csv_file_path, new_csv_file_path)
+            print(f"Archivo {csv_file}.csv renombrado a {txt_file}.csv")
+        except Exception as e:
+            print(f"Error al renombrar el archivo {csv_file}.csv: {e}")
+
+    print("Renombrado completado.")
+
+    # Eliminar los archivos .txt de origen después de completar el proceso
+    for file_path in output_dir.glob("*.txt"):
+        try:
+            os.remove(file_path)
+            print(f"Archivo {file_path.name} eliminado.")
+        except Exception as e:
+            print(f"Error al eliminar el archivo {file_path.name}: {e}")
+
+if __name__ == "__main__":
+    download_and_rename_files()
+
+### PARTE 3 MOVER
+import shutil
+
+# Ruta de la carpeta de origen
+descarga_dir = Path(r"C:\Users\echild\Documents\Python\Output\Descarga")
+
+# Ruta de la carpeta de destino
+carpeta_destino = Path(r"C:\Users\echild\Documents\Python\Output\Movido")
+carpeta_destino.mkdir(parents=True, exist_ok=True)
+
+for file_path in descarga_dir.glob("*"):
+    if file_path.is_file():
+        file_name = file_path.name
+        file_destino_path = carpeta_destino / file_name
+
+        # Copiar el archivo desde la carpeta de origen a la carpeta de destino
+        shutil.copy(file_path, file_destino_path)
+        print(f"Archivo {file_name} copiado a {carpeta_destino}")
+
+        # Eliminar el archivo de origen después de copiarlo
+        os.remove(file_path)
+        print(f"Archivo {file_name} eliminado de {descarga_dir}")
+
+print("Archivos copiados y originales eliminados.")
+
+##ES NECESARIO INSTALAR:
+## pip install requests
+## pip pip install extract-msg
+## pip install pywin32
